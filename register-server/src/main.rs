@@ -189,8 +189,11 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http::{Method, Request};
     use kube::api::ObjectList;
     use trusted_cluster_operator_test_utils::mock_client::*;
+
+    const TEST_IP: &str = "12.34.56.78";
 
     fn dummy_clusters() -> ObjectList<TrustedExecutionCluster> {
         ObjectList {
@@ -239,5 +242,58 @@ mod tests {
     #[tokio::test]
     async fn test_get_public_trustee_error() {
         test_get_error(async |c| get_public_trustee_addr(c).await.map(|_| ())).await;
+    }
+
+    fn dummy_machine() -> Machine {
+        Machine {
+            metadata: ObjectMeta {
+                name: Some("test".to_string()),
+                ..Default::default()
+            },
+            spec: MachineSpec {
+                id: "test".to_string(),
+                registration_address: TEST_IP.to_string(),
+            },
+            status: None,
+        }
+    }
+
+    fn dummy_machines() -> ObjectList<Machine> {
+        ObjectList {
+            types: Default::default(),
+            metadata: Default::default(),
+            items: vec![dummy_machine()],
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_machine() {
+        let clos = async |req: Request<_>, ctr| match (ctr, req.method()) {
+            (0, &Method::GET) => Ok(serde_json::to_string(&dummy_machines()).unwrap()),
+            (1, &Method::POST) => Ok(serde_json::to_string(&dummy_machine()).unwrap()),
+            _ => panic!("unexpected API interaction: {req:?}, counter {ctr}"),
+        };
+        count_check!(2, clos, |client| {
+            assert!(create_machine(client, "test", "::").await.is_ok());
+        });
+    }
+
+    #[tokio::test]
+    async fn test_create_machine_existing_ip() {
+        let clos = async |req: Request<_>, ctr| match (ctr, req.method()) {
+            (0, &Method::GET) => Ok(serde_json::to_string(&dummy_machines()).unwrap()),
+            (1, &Method::DELETE) | (2, &Method::POST) => {
+                Ok(serde_json::to_string(&dummy_machine()).unwrap())
+            }
+            _ => panic!("unexpected API interaction: {req:?}, counter {ctr}"),
+        };
+        count_check!(3, clos, |client| {
+            assert!(create_machine(client, "test", TEST_IP).await.is_ok());
+        });
+    }
+
+    #[tokio::test]
+    async fn test_create_machine_error() {
+        test_get_error(async |c| create_machine(c, "test", TEST_IP).await.map(|_| ())).await;
     }
 }
