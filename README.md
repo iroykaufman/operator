@@ -108,12 +108,18 @@ make push-all
 
 **4. Deploy the Bundle**
 
-Deploy the bundle to your cluster. We use `trusted-execution-clusters` as an example namespace.
+Deploy the bundle to your cluster. You can install it in any namespace. This guide uses `trusted-execution-clusters` as the example namespace.
 
 ```bash
+# Example: Install in namespace 'trusted-execution-clusters'
 kubectl create namespace trusted-execution-clusters || true
 (cd /tmp && operator-sdk run bundle ${REGISTRY}/trusted-cluster-operator-bundle:${TAG} --namespace trusted-execution-clusters)
 ```
+
+> **OpenShift Users:** After deploying the bundle, you need to manually create the SecurityContextConstraints (SCC). Apply the SCC template with your installation namespace:
+> ```bash
+> sed 's/<NAMESPACE>/trusted-execution-clusters/g' config/openshift/scc.yaml | kubectl apply -f -
+> ```
 
 **5. Create the Custom Resource**
 
@@ -135,8 +141,8 @@ yq -i '.spec.publicTrusteeAddr = "'$TRUSTEE_ADDR':8080"' \
 # Apply the configured CRs
 kubectl apply -f config/deploy/trusted_execution_cluster_cr.yaml
 kubectl apply -f config/deploy/approved_image_cr.yaml
-kubectl apply -f kind/kbs-forward.yaml
-kubectl apply -f kind/register-forward.yaml
+sed 's/<NAMESPACE>/trusted-execution-clusters/g' kind/kbs-forward.yaml | kubectl apply -f -
+sed 's/<NAMESPACE>/trusted-execution-clusters/g' kind/register-forward.yaml | kubectl apply -f -
 ```
 
 #### **Cleaning Up the Bundle Deployment**

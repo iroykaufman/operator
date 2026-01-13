@@ -10,7 +10,8 @@ trusted-cluster-gen
 /bin
 /config/crd
 /config/deploy
-/config/rbac/base/role.yaml
+/config/rbac/role.yaml
+/config/rbac/kustomization.yaml
 /lib/src/kopium
 /target
 bundle/manifests/

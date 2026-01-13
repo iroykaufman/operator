@@ -32,7 +32,8 @@ BUNDLE_MANIFESTS="${BUNDLE_DIR}/manifests"
 BUNDLE_METADATA="${BUNDLE_DIR}/metadata"
 CSV_TEMPLATE="${PROJECT_ROOT}/bundle/static/manifests/trusted-cluster-operator.clusterserviceversion.yaml"
 ANNOTATIONS_TEMPLATE="${PROJECT_ROOT}/bundle/static/metadata/annotations.yaml"
-RBAC_ROLE_FILE="${PROJECT_ROOT}/config/rbac/base/role.yaml"
+RBAC_ROLE_FILE="${PROJECT_ROOT}/config/rbac/role.yaml"
+METRICS_AUTH_ROLE_FILE="${PROJECT_ROOT}/config/rbac/metrics_auth_role.yaml"
 
 echo "=> Cleaning previous bundle..."
 rm -rf "${BUNDLE_MANIFESTS}" "${BUNDLE_METADATA}"
@@ -41,7 +42,7 @@ mkdir -p "${BUNDLE_MANIFESTS}" "${BUNDLE_METADATA}"
 echo "=> Copying CRDs and static assets..."
 shopt -s nullglob
 cp "${PROJECT_ROOT}/config/crd"/*.yaml "${BUNDLE_MANIFESTS}/"
-cp "${PROJECT_ROOT}/config/rbac/base"/*.yaml "${BUNDLE_MANIFESTS}/"
+cp "${PROJECT_ROOT}/config/rbac"/*.yaml "${BUNDLE_MANIFESTS}/"
 rm -f "${BUNDLE_MANIFESTS}/kustomization.yaml"
 rm -f "${BUNDLE_MANIFESTS}/service_account.yaml"
 # Remove operator's main RBAC files - these are defined in CSV's clusterPermissions instead
@@ -70,17 +71,22 @@ yq -i "(.spec.relatedImages[] | select(.name == \"trustee\")).image = \"${TRUSTE
 
 # Patch RBAC rules
 yq -i ".spec.install.spec.clusterPermissions[0].rules = load(\"${RBAC_ROLE_FILE}\").rules" "$CSV_FILE"
+yq -i ".spec.install.spec.clusterPermissions[1].rules = load(\"${METRICS_AUTH_ROLE_FILE}\").rules" "$CSV_FILE"
 
-echo "=> Patching RBAC binding namespaces..."
-for binding_file in role_binding.yaml metrics_auth_role_binding.yaml leader_election_role_binding.yaml; do
+echo "=> Removing hardcoded namespaces from RBAC bindings (OLM will inject them)..."
+for binding_file in leader_election_role_binding.yaml; do
   file_path="${BUNDLE_MANIFESTS}/${binding_file}"
   if [ -f "$file_path" ]; then
-    echo "--> Patching ${binding_file}..."
-    yq -i ".subjects[0].namespace = \"${NAMESPACE}\"" "$file_path"
+    echo "--> Removing namespace from ${binding_file}..."
+    yq -i "del(.subjects[0].namespace)" "$file_path"
   else
     echo "WARN: Binding file ${binding_file} not found in bundle, skipping patch."
   fi
 done
+
+echo "=> Removing metrics-auth standalone manifests (now in CSV clusterPermissions)..."
+rm -f "${BUNDLE_MANIFESTS}/metrics_auth_role.yaml"
+rm -f "${BUNDLE_MANIFESTS}/metrics_auth_role_binding.yaml"
 
 # Set .spec.replaces for automatic upgrades if provided
 if [[ -n "$PREVIOUS_CSV" ]]; then

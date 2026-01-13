@@ -74,6 +74,21 @@ spec:
         - serviceAccountName: trusted-cluster-operator
           # Rules are dynamically generated from config/rbac/role.yaml during the bundle build
           rules: []
+        - serviceAccountName: trusted-cluster-operator
+          # Metrics authentication permissions
+          rules:
+            - apiGroups:
+                - authentication.k8s.io
+              resources:
+                - tokenreviews
+              verbs:
+                - create
+            - apiGroups:
+                - authorization.k8s.io
+              resources:
+                - subjectaccessreviews
+              verbs:
+                - create
       deployments:
         - name: trusted-cluster-operator
           spec:

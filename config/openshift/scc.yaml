@@ -4,7 +4,7 @@
 apiVersion: security.openshift.io/v1
 kind: SecurityContextConstraints
 metadata:
-  name: trusted-cluster-scc
+  name: <NAMESPACE>-trusted-cluster-scc
 allowHostDirVolumePlugin: false
 allowHostIPC: false
 allowHostNetwork: false
@@ -34,4 +34,4 @@ volumes:
 - projected
 - secret
 users:
-- system:serviceaccount:trusted-execution-clusters:trusted-cluster-operator
+- system:serviceaccount:<NAMESPACE>:trusted-cluster-operator
