@@ -12,6 +12,7 @@ path = [
   "docs/pics/*",
   "docs/design/*",
   "docs/dev/*",
+  "docs/usage/*",
   "lib/src/vendor_kopium/*",
   "must-gather/README.md",
   "tests/README.md",
