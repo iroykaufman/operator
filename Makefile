@@ -46,7 +46,7 @@ attestation-key-register: crds-rs
 	cargo build -p attestation-key-register
 
 CRD_YAML_PATH = config/crd
-RBAC_YAML_PATH = config/rbac/base
+RBAC_YAML_PATH = config/rbac
 API_PATH = api/v1alpha1
 generate: $(CONTROLLER_GEN)
 	$(CONTROLLER_GEN) rbac:roleName=trusted-cluster-operator-role crd webhook paths="./..." \
@@ -123,6 +123,7 @@ bundle: manifests
 	@OPERATOR_IMAGE=$(OPERATOR_IMAGE) \
 	COMPUTE_PCRS_IMAGE=$(COMPUTE_PCRS_IMAGE) \
 	REG_SERVER_IMAGE=$(REG_SERVER_IMAGE) \
+	ATTESTATION_KEY_REGISTER_IMAGE=$(ATTESTATION_KEY_REGISTER_IMAGE) \
 	TRUSTEE_IMAGE=$(TRUSTEE_IMAGE) \
 	scripts/generate-bundle-prod.sh -v $(TAG) -n $(NAMESPACE) $(if $(PREVIOUS_CSV),-p $(PREVIOUS_CSV))
 
@@ -143,19 +144,18 @@ endif
 	scripts/clean-cluster-kind.sh $(OPERATOR_IMAGE) $(COMPUTE_PCRS_IMAGE) $(REG_SERVER_IMAGE) $(ATTESTATION_KEY_REGISTER_IMAGE)
 	$(YQ) '.spec.publicTrusteeAddr = "$(TRUSTEE_ADDR):8080"' \
 		-i $(DEPLOY_PATH)/trusted_execution_cluster_cr.yaml
-	$(YQ) '.namespace = "$(NAMESPACE)"' -i config/rbac/base/kustomization.yaml
-	$(YQ) '.patches[0].patch = "- op: replace\n  path: /metadata/name\n  value: $(NAMESPACE)-manager-rolebinding"' -i config/rbac/base/kustomization.yaml
-	$(YQ) '.patches[1].patch = "- op: replace\n  path: /metadata/name\n  value: $(NAMESPACE)-metrics-auth-rolebinding"' -i config/rbac/base/kustomization.yaml
-	@if [ "$(PLATFORM)" = "openshift" ]; then \
-		$(YQ) '.patches[0].patch = "- op: replace\n  path: /metadata/name\n  value: $(NAMESPACE)-trusted-cluster-scc\n- op: replace\n  path: /users/0\n  value: system:serviceaccount:$(NAMESPACE):trusted-cluster-operator"' -i config/rbac/overlays/openshift/kustomization.yaml; \
-	fi
+	sed "s/NAMESPACE/$(NAMESPACE)/g" config/rbac/kustomization.yaml.in > config/rbac/kustomization.yaml
 	$(KUBECTL) apply -f $(DEPLOY_PATH)/operator.yaml
 	$(KUBECTL) apply -f config/crd
-	$(KUBECTL) apply -k config/rbac/overlays/$(PLATFORM)
+	$(KUBECTL) apply -k config/rbac
+	@if [ "$(PLATFORM)" = "openshift" ]; then \
+		sed 's/<NAMESPACE>/$(NAMESPACE)/g' config/openshift/scc.yaml | $(KUBECTL) apply -f -; \
+	else \
+		sed 's/<NAMESPACE>/$(NAMESPACE)/g' kind/register-forward.yaml | $(KUBECTL) apply -f -; \
+		sed 's/<NAMESPACE>/$(NAMESPACE)/g' kind/kbs-forward.yaml | $(KUBECTL) apply -f -; \
+	fi
 	$(KUBECTL) apply -f $(DEPLOY_PATH)/trusted_execution_cluster_cr.yaml
 	$(KUBECTL) apply -f $(DEPLOY_PATH)/approved_image_cr.yaml
-	$(KUBECTL) apply -f kind/register-forward.yaml
-	$(KUBECTL) apply -f kind/kbs-forward.yaml
 
 install-kubevirt:
 	scripts/install-kubevirt.sh
@@ -166,7 +166,7 @@ pre-pull-images:
 clean:
 	cargo clean
 	rm -rf bin manifests $(CRD_YAML_PATH) $(CRD_RS_PATH)
-	rm -f trusted-cluster-gen config/rbac/base/role.yaml .crates.toml .crates2.json
+	rm -f trusted-cluster-gen config/rbac/role.yaml .crates.toml .crates2.json
 
 fmt-check:
 	cargo fmt -- --check
