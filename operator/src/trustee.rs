@@ -24,6 +24,7 @@ use kube::{
     api::ObjectMeta,
     runtime::{
         controller::{Action, Controller},
+        reflector::ObjectRef,
         watcher,
     },
 };
@@ -40,8 +41,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use trusted_cluster_operator_lib::endpoints::*;
 use trusted_cluster_operator_lib::reference_values::*;
-use trusted_cluster_operator_lib::{Machine, endpoints::*};
+
+use crate::attestation_key_register::AkContextData;
 
 const TRUSTEE_DATA_DIR: &str = "/etc/kbs";
 const KBS_CONFIG_FILE: &str = "kbs-config.toml";
@@ -103,7 +106,8 @@ fn recompute_reference_values(image_pcrs: ImagePcrs) -> Vec<ReferenceValue> {
         .collect()
 }
 
-pub async fn update_reference_values(client: Client) -> Result<()> {
+pub async fn update_reference_values(ctx: AkContextData) -> Result<()> {
+    let client = ctx.client.clone();
     let config_maps: Api<ConfigMap> = Api::default_namespaced(client.clone());
 
     let image_pcrs_map = config_maps.get(PCR_CONFIG_MAP).await?;
@@ -118,7 +122,7 @@ pub async fn update_reference_values(client: Client) -> Result<()> {
         .replace(TRUSTEE_RV_MAP, &Default::default(), &rv_map)
         .await?;
 
-    if let Err(e) = sync_reference_values(&client, &reference_values).await {
+    if let Err(e) = sync_reference_values(&ctx, &reference_values).await {
         warn!(
             "Failed to sync reference values to KBS (will retry on next deployment reconcile): {e}"
         );
@@ -127,10 +131,16 @@ pub async fn update_reference_values(client: Client) -> Result<()> {
     Ok(())
 }
 
-async fn get_auth_key_token(client: &Client) -> Result<String> {
-    let secret_api: Api<Secret> = Api::default_namespaced(client.clone());
-    let auth_secret = secret_api.get(TRUSTEE_AUTH_SECRET).await?;
-    let auth_data = auth_secret.data.context("Auth secret has no data")?;
+async fn get_auth_key_token(ctx: &AkContextData) -> Result<String> {
+    let ns = ctx.client.default_namespace().to_string();
+    let auth_secret = ctx
+        .secret_store
+        .get(&ObjectRef::new(TRUSTEE_AUTH_SECRET).within(&ns))
+        .context("Auth secret not found in store")?;
+    let auth_data = auth_secret
+        .data
+        .as_ref()
+        .context("Auth secret has no data")?;
     let auth_key_bytes = auth_data
         .get(TRUSTEE_AUTH_PRIV_KEY)
         .context("Auth secret missing private.key")?;
@@ -145,12 +155,15 @@ async fn get_auth_key_token(client: &Client) -> Result<String> {
     let token = encode(&Header::new(Algorithm::EdDSA), &claims, &encoding_key)?;
     Ok(token)
 }
-async fn get_kbs_connection(client: &Client) -> Result<(String, Vec<String>)> {
-    let tec = trusted_cluster_operator_lib::get_trusted_execution_cluster(client.clone()).await?;
-    let secret_api: Api<Secret> = Api::default_namespaced(client.clone());
+async fn get_kbs_connection(ctx: &AkContextData) -> Result<(String, Vec<String>)> {
+    let tec =
+        trusted_cluster_operator_lib::get_trusted_execution_cluster(ctx.client.clone()).await?;
+    let ns = ctx.client.default_namespace().to_string();
 
     if let Some(secret_name) = &tec.spec.trustee_secret
-        && let Ok(secret) = secret_api.get(secret_name).await
+        && let Some(secret) = ctx
+            .secret_store
+            .get(&ObjectRef::new(secret_name).within(&ns))
         && let Some(ca_crt) = secret.data.as_ref().and_then(|d| d.get("ca.crt"))
     {
         let ca_pem =
@@ -177,9 +190,12 @@ async fn get_kbs_connection(client: &Client) -> Result<(String, Vec<String>)> {
     ))
 }
 
-async fn sync_reference_values(client: &Client, reference_values: &[ReferenceValue]) -> Result<()> {
-    let auth_token = get_auth_key_token(client).await?;
-    let (url, certs) = get_kbs_connection(client).await?;
+async fn sync_reference_values(
+    ctx: &AkContextData,
+    reference_values: &[ReferenceValue],
+) -> Result<()> {
+    let auth_token = get_auth_key_token(ctx).await?;
+    let (url, certs) = get_kbs_connection(ctx).await?;
     for rv in reference_values {
         kbs_client::set_sample_rv(
             url.clone(),
@@ -194,8 +210,8 @@ async fn sync_reference_values(client: &Client, reference_values: &[ReferenceVal
     Ok(())
 }
 
-async fn sync_reference_values_from_configmap(client: &Client) -> Result<()> {
-    let config_maps: Api<ConfigMap> = Api::default_namespaced(client.clone());
+async fn sync_reference_values_from_configmap(ctx: &AkContextData) -> Result<()> {
+    let config_maps: Api<ConfigMap> = Api::default_namespaced(ctx.client.clone());
     let rv_map = config_maps.get(TRUSTEE_RV_MAP).await?;
     let data = rv_map.data.context("RV ConfigMap has no data")?;
     let rv_json = match data.get(REFERENCE_VALUES_FILE) {
@@ -209,12 +225,12 @@ async fn sync_reference_values_from_configmap(client: &Client) -> Result<()> {
     if reference_values.is_empty() {
         return Ok(());
     }
-    sync_reference_values(client, &reference_values).await
+    sync_reference_values(ctx, &reference_values).await
 }
 
-pub async fn sync_resource_policy(client: Client) -> Result<()> {
-    let auth_token = get_auth_key_token(&client).await?;
-    let (url, certs) = get_kbs_connection(&client).await?;
+pub async fn sync_resource_policy(ctx: &AkContextData) -> Result<()> {
+    let auth_token = get_auth_key_token(ctx).await?;
+    let (url, certs) = get_kbs_connection(ctx).await?;
     let policy = include_str!("resource.rego");
     info!("Sending resource policy to KBS API...");
     kbs_client::set_resource_policy(&url, Some(auth_token), policy.as_bytes().to_vec(), certs)
@@ -223,9 +239,9 @@ pub async fn sync_resource_policy(client: Client) -> Result<()> {
     Ok(())
 }
 
-pub async fn sync_attestation_policy(client: Client) -> Result<()> {
-    let auth_token = get_auth_key_token(&client).await?;
-    let (url, certs) = get_kbs_connection(&client).await?;
+pub async fn sync_attestation_policy(ctx: &AkContextData) -> Result<()> {
+    let auth_token = get_auth_key_token(ctx).await?;
+    let (url, certs) = get_kbs_connection(ctx).await?;
     let policy = include_str!("tpm.rego");
     info!("Sending attestation policy to KBS API...");
     kbs_client::set_attestation_policy(
@@ -243,7 +259,7 @@ pub async fn sync_attestation_policy(client: Client) -> Result<()> {
 
 async fn trustee_deployment_reconcile(
     deployment: Arc<Deployment>,
-    client: Arc<Client>,
+    ctx: Arc<AkContextData>,
 ) -> Result<Action, ControllerError> {
     if let Some(status) = &deployment.status
         && let Some(is_available) = &status.conditions
@@ -251,24 +267,23 @@ async fn trustee_deployment_reconcile(
             .iter()
             .any(|c| c.type_ == "Available" && c.status == "True")
     {
-        let c = Arc::unwrap_or_clone(client.clone());
-        if let Err(e) = sync_resource_policy(c.clone()).await {
+        if let Err(e) = sync_resource_policy(&ctx).await {
             warn!("Failed to sync resource policy to KBS: {e}");
             return Ok(Action::requeue(Duration::from_secs(30)));
         }
-        if let Err(e) = sync_attestation_policy(c.clone()).await {
+        if let Err(e) = sync_attestation_policy(&ctx).await {
             warn!("Failed to sync attestation policy to KBS: {e}");
             return Ok(Action::requeue(Duration::from_secs(30)));
         }
-        if let Err(e) = sync_reference_values_from_configmap(&c).await {
+        if let Err(e) = sync_reference_values_from_configmap(&ctx).await {
             warn!("Failed to sync reference values to KBS: {e}");
             return Ok(Action::requeue(Duration::from_secs(30)));
         }
-        if let Err(e) = sync_all_machine_luks_key(c.clone()).await {
+        if let Err(e) = sync_all_machine_luks_key(&ctx).await {
             warn!("Failed to sync machine luks keys to KBS: {e}");
             return Ok(Action::requeue(Duration::from_secs(30)));
         }
-        if let Err(e) = update_attestation_keys(c).await {
+        if let Err(e) = update_attestation_keys(&ctx).await {
             warn!("Failed to update attestation keys to KBS: {e}");
             return Ok(Action::requeue(Duration::from_secs(30)));
         }
@@ -277,7 +292,8 @@ async fn trustee_deployment_reconcile(
     Ok(Action::await_change())
 }
 
-pub async fn launch_trustee_sync_controller(client: Client) {
+pub async fn launch_trustee_sync_controller(ctx: Arc<AkContextData>) {
+    let client = ctx.client.clone();
     let deployments: Api<Deployment> = Api::default_namespaced(client.clone());
     let watcher_config = watcher::Config {
         label_selector: Some(format!("app={TRUSTEE_APP_LABEL}")),
@@ -285,11 +301,7 @@ pub async fn launch_trustee_sync_controller(client: Client) {
     };
     tokio::spawn(
         Controller::new(deployments, watcher_config)
-            .run(
-                trustee_deployment_reconcile,
-                controller_error_policy,
-                Arc::new(client),
-            )
+            .run(trustee_deployment_reconcile, controller_error_policy, ctx)
             .for_each(controller_info),
     );
 }
@@ -325,12 +337,15 @@ pub fn secret_path(id: &str) -> String {
     format!("default/{id}/root")
 }
 
-pub async fn send_secret(client: Client, id: &str) -> Result<()> {
-    let secret_api: Api<Secret> = Api::default_namespaced(client.clone());
-    let auth_key_token = get_auth_key_token(&client).await?;
-    let (url, certs) = get_kbs_connection(&client).await?;
-    let secret = secret_api.get(id).await?;
-    let secret_data = secret.data.context("Secret has no data")?;
+pub async fn send_secret(ctx: &AkContextData, id: &str) -> Result<()> {
+    let auth_key_token = get_auth_key_token(ctx).await?;
+    let (url, certs) = get_kbs_connection(ctx).await?;
+    let ns = ctx.client.default_namespace().to_string();
+    let secret = ctx
+        .secret_store
+        .get(&ObjectRef::new(id).within(&ns))
+        .context(format!("Secret {id} not found in store"))?;
+    let secret_data = secret.data.as_ref().context("Secret has no data")?;
     let resource_bytes = secret_data
         .get("root")
         .context("Secret missing root key")?
@@ -343,9 +358,9 @@ pub async fn send_secret(client: Client, id: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn delete_secret(client: Client, id: &str) -> Result<()> {
-    let auth_key_token = get_auth_key_token(&client).await?;
-    let (url, certs) = get_kbs_connection(&client).await?;
+pub async fn delete_secret(ctx: &AkContextData, id: &str) -> Result<()> {
+    let auth_key_token = get_auth_key_token(ctx).await?;
+    let (url, certs) = get_kbs_connection(ctx).await?;
     let path = secret_path(id);
     info!("Deleting secret {id} to KBS API...");
     kbs_client::delete_resource(&url, Some(auth_key_token), &path, certs).await?;
@@ -353,9 +368,9 @@ pub async fn delete_secret(client: Client, id: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn register_ak(client: Client, ak_secrets: &[String]) -> Result<()> {
-    let auth_key_token = get_auth_key_token(&client).await?;
-    let (url, certs) = get_kbs_connection(&client).await?;
+pub async fn register_ak(ctx: &AkContextData, ak_secrets: &[String]) -> Result<()> {
+    let auth_key_token = get_auth_key_token(ctx).await?;
+    let (url, certs) = get_kbs_connection(ctx).await?;
     let ak_der: Vec<serde_json::Value> = ak_secrets
         .iter()
         .map(|ak| {
@@ -379,29 +394,25 @@ pub async fn register_ak(client: Client, ak_secrets: &[String]) -> Result<()> {
     Ok(())
 }
 
-pub async fn sync_all_machine_luks_key(client: Client) -> Result<()> {
-    let machine_api: Api<Machine> = Api::default_namespaced(client.clone());
-    let machine_list = machine_api.list(&Default::default()).await?;
-
-    let machine_ids: Vec<String> = machine_list
-        .items
+pub async fn sync_all_machine_luks_key(ctx: &AkContextData) -> Result<()> {
+    let machine_ids: Vec<String> = ctx
+        .machine_store
+        .state()
         .iter()
         .map(|machine| machine.spec.id.clone())
         .collect();
 
     info!("Syncing {} machine luks key to KBS", machine_ids.len());
     for id in &machine_ids {
-        send_secret(client.clone(), id).await?;
+        send_secret(ctx, id).await?;
     }
     Ok(())
 }
 
-pub async fn update_attestation_keys(client: Client) -> Result<()> {
-    let secrets: Api<Secret> = Api::default_namespaced(client.clone());
-    let secret_list = secrets.list(&Default::default()).await?;
-
-    let ak_secrets: Vec<String> = secret_list
-        .items
+pub async fn update_attestation_keys(ctx: &AkContextData) -> Result<()> {
+    let ak_secrets: Vec<String> = ctx
+        .secret_store
+        .state()
         .iter()
         .filter(|secret| {
             // Filter out secrets that are being deleted
@@ -424,7 +435,7 @@ pub async fn update_attestation_keys(client: Client) -> Result<()> {
         })
         .collect();
 
-    if let Err(e) = register_ak(client.clone(), &ak_secrets).await {
+    if let Err(e) = register_ak(ctx, &ak_secrets).await {
         warn!("Failed to register AK to KBS: {e}");
     }
 
@@ -703,6 +714,8 @@ mod tests {
     use crate::test_utils::*;
     use http::{Method, Request, StatusCode};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+    use kube::runtime::reflector;
+    use kube::runtime::reflector::Store;
     use trusted_cluster_operator_test_utils::mock_client::*;
     use trusted_cluster_operator_test_utils::test_error_method;
 
@@ -753,7 +766,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_rvs_success() {
-        let _ = jsonwebtoken_openssl::install_default();
         let clos = async |req: Request<_>, ctr| match (ctr, req.method()) {
             (0, &Method::GET) => {
                 assert!(req.uri().path().contains(PCR_CONFIG_MAP));
@@ -763,15 +775,11 @@ mod tests {
                 assert!(req.uri().path().contains(TRUSTEE_RV_MAP));
                 Ok(serde_json::to_string(&dummy_trustee_map()).unwrap())
             }
-            (3, &Method::GET) => {
-                assert!(req.uri().path().contains(TRUSTEE_AUTH_SECRET));
-                Ok(serde_json::to_string(&dummy_trustee_auth()).unwrap())
-            }
-            (4, &Method::GET) => Ok(serde_json::to_string(&dummy_cluster()).unwrap()),
             _ => panic!("unexpected API interaction: {req:?}, counter {ctr}"),
         };
-        count_check!(5, clos, |client| {
-            assert!(update_reference_values(client).await.is_ok());
+        count_check!(3, clos, |client| {
+            let ctx = dummy_ak_ctx(client);
+            assert!(update_reference_values(ctx).await.is_ok());
         });
     }
 
@@ -782,7 +790,8 @@ mod tests {
             _ => panic!("unexpected API interaction: {req:?}"),
         };
         count_check!(1, clos, |client| {
-            assert!(update_reference_values(client).await.is_err());
+            let ctx = dummy_ak_ctx(client);
+            assert!(update_reference_values(ctx).await.is_err());
         });
     }
 
@@ -796,7 +805,8 @@ mod tests {
             _ => panic!("unexpected API interaction: {req:?}, counter {ctr}"),
         };
         count_check!(2, clos, |client| {
-            assert!(update_reference_values(client).await.is_err())
+            let ctx = dummy_ak_ctx(client);
+            assert!(update_reference_values(ctx).await.is_err())
         });
     }
 
@@ -812,7 +822,8 @@ mod tests {
             _ => panic!("unexpected API interaction: {req:?}, counter {ctr}"),
         };
         count_check!(2, clos, |client| {
-            let err = update_reference_values(client).await.err().unwrap();
+            let ctx = dummy_ak_ctx(client);
+            let err = update_reference_values(ctx).await.err().unwrap();
             assert!(err.to_string().contains("but had no data"));
         });
     }
@@ -935,121 +946,122 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_sync_all_machine_luks_key_empty() {
-        let clos = async |req: Request<_>, ctr| match (ctr, req.method()) {
-            (0, &Method::GET) => {
-                let list = kube::api::ObjectList {
-                    items: Vec::<Machine>::new(),
-                    types: Default::default(),
-                    metadata: Default::default(),
-                };
-                Ok(serde_json::to_string(&list).unwrap())
-            }
-            _ => panic!("unexpected API interaction: {req:?}, counter {ctr}"),
-        };
-        count_check!(1, clos, |client| {
-            assert!(sync_all_machine_luks_key(client).await.is_ok());
-        });
+    fn build_store<K: Resource<DynamicType = ()> + Clone + 'static>(items: Vec<K>) -> Store<K> {
+        let (store, mut writer) = reflector::store::<K>();
+        writer.apply_watcher_event(&watcher::Event::Init);
+        for item in items {
+            writer.apply_watcher_event(&watcher::Event::InitApply(item));
+        }
+        writer.apply_watcher_event(&watcher::Event::InitDone);
+        store
+    }
+
+    fn named_secret(name: &str, base: Secret) -> Secret {
+        Secret {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some("test".to_string()),
+                ..base.metadata
+            },
+            ..base
+        }
     }
 
     #[tokio::test]
-    async fn test_sync_all_machine_luks_key_send_error() {
-        let clos = async |req: Request<_>, ctr| match (ctr, req.method()) {
-            (0, &Method::GET) => {
-                let list = kube::api::ObjectList {
-                    items: vec![dummy_machine("m1")],
-                    types: Default::default(),
-                    metadata: Default::default(),
-                };
-                Ok(serde_json::to_string(&list).unwrap())
-            }
-            (_, &Method::GET) => Err(StatusCode::NOT_FOUND),
-            _ => panic!("unexpected API interaction: {req:?}, counter {ctr}"),
+    async fn test_sync_all_machine_luks_key_empty() {
+        let clos = async |req: Request<_>, ctr| {
+            panic!("unexpected API interaction: {req:?}, counter {ctr}")
         };
-        count_check!(2, clos, |client| {
-            assert!(sync_all_machine_luks_key(client).await.is_err());
+        count_check!(0, clos, |client| {
+            let ctx = dummy_ak_ctx(client);
+            assert!(sync_all_machine_luks_key(&ctx).await.is_ok());
+        });
+    }
+    #[tokio::test]
+    async fn test_sync_all_machine_luks_key_send_error() {
+        let clos = async |req: Request<_>, ctr| {
+            panic!("unexpected API interaction: {req:?}, counter {ctr}")
+        };
+        count_check!(0, clos, |client| {
+            let ctx = AkContextData {
+                machine_store: build_store(vec![dummy_machine("m1")]),
+                ..dummy_ak_ctx(client)
+            };
+            assert!(sync_all_machine_luks_key(&ctx).await.is_err());
         });
     }
 
     #[tokio::test]
     async fn test_update_attestation_keys_empty() {
-        let clos = async |_, ctr| match ctr {
-            0 => {
-                let list = kube::api::ObjectList {
-                    items: Vec::<Secret>::new(),
-                    types: Default::default(),
-                    metadata: Default::default(),
-                };
-                Ok(serde_json::to_string(&list).unwrap())
-            }
-            _ => Err(StatusCode::NOT_FOUND),
+        let clos = async |req: Request<_>, ctr| {
+            panic!("unexpected API interaction: {req:?}, counter {ctr}")
         };
-        count_check!(2, clos, |client| {
-            assert!(update_attestation_keys(client).await.is_ok());
+        count_check!(0, clos, |client| {
+            let ctx = dummy_ak_ctx(client);
+            assert!(update_attestation_keys(&ctx).await.is_ok());
         });
     }
 
     #[tokio::test]
     async fn test_update_attestation_keys_register_fails_gracefully() {
-        let clos = async |_, ctr| match ctr {
-            0 => {
-                let list = kube::api::ObjectList {
-                    items: vec![dummy_ak_secret("ak1"), dummy_ak_secret("ak2")],
-                    types: Default::default(),
-                    metadata: Default::default(),
-                };
-                Ok(serde_json::to_string(&list).unwrap())
-            }
-            _ => Err(StatusCode::NOT_FOUND),
+        let clos = async |req: Request<_>, ctr| {
+            panic!("unexpected API interaction: {req:?}, counter {ctr}")
         };
-        count_check!(2, clos, |client| {
-            assert!(update_attestation_keys(client).await.is_ok());
+        count_check!(0, clos, |client| {
+            let ctx = AkContextData {
+                secret_store: build_store(vec![
+                    named_secret("ak1", dummy_ak_secret("ak1")),
+                    named_secret("ak2", dummy_ak_secret("ak2")),
+                ]),
+                ..dummy_ak_ctx(client)
+            };
+            assert!(update_attestation_keys(&ctx).await.is_ok());
         });
     }
 
     #[tokio::test]
     async fn test_update_attestation_keys_register_success() {
         let _ = jsonwebtoken_openssl::install_default();
-        let clos = async |req: Request<_>, ctr| match (ctr, req.method()) {
-            (0, &Method::GET) => {
-                let list = kube::api::ObjectList {
-                    items: vec![dummy_ak_secret("ak1")],
-                    types: Default::default(),
-                    metadata: Default::default(),
-                };
-                Ok(serde_json::to_string(&list).unwrap())
-            }
-            (1, &Method::GET) => {
-                assert!(req.uri().path().contains(TRUSTEE_AUTH_SECRET));
-                Ok(serde_json::to_string(&dummy_trustee_auth()).unwrap())
-            }
-            (2, &Method::GET) => Ok(serde_json::to_string(&dummy_cluster()).unwrap()),
-            _ => panic!("unexpected API interaction: {req:?}, counter {ctr}"),
+        let clos = async |_, _| {
+            let list = kube::api::ObjectList {
+                items: vec![dummy_cluster()],
+                types: Default::default(),
+                metadata: Default::default(),
+            };
+            Ok(serde_json::to_string(&list).unwrap())
         };
-        count_check!(3, clos, |client| {
-            assert!(update_attestation_keys(client).await.is_ok());
+        count_check!(1, clos, |client| {
+            let ctx = AkContextData {
+                secret_store: build_store(vec![
+                    named_secret(TRUSTEE_AUTH_SECRET, dummy_trustee_auth()),
+                    named_secret("ak1", dummy_ak_secret("ak1")),
+                ]),
+                ..dummy_ak_ctx(client)
+            };
+            assert!(update_attestation_keys(&ctx).await.is_ok());
         });
     }
 
     #[tokio::test]
     async fn test_update_attestation_keys_filters_deleting() {
-        let clos = async |_, ctr| match ctr {
-            0 => {
-                let mut deleting = dummy_ak_secret("ak-deleting");
-                deleting.metadata.deletion_timestamp =
-                    Some(Time(k8s_openapi::jiff::Timestamp::now()));
-                let list = kube::api::ObjectList {
-                    items: vec![deleting],
-                    types: Default::default(),
-                    metadata: Default::default(),
-                };
-                Ok(serde_json::to_string(&list).unwrap())
-            }
-            _ => Err(StatusCode::NOT_FOUND),
+        let clos = async |req: Request<_>, ctr| {
+            panic!("unexpected API interaction: {req:?}, counter {ctr}")
         };
-        count_check!(2, clos, |client| {
-            assert!(update_attestation_keys(client).await.is_ok());
+        count_check!(0, clos, |client| {
+            let mut deleting = named_secret("ak-deleting", dummy_ak_secret("ak-deleting"));
+            deleting.metadata.deletion_timestamp = Some(Time(k8s_openapi::jiff::Timestamp::now()));
+            let no_owner = Secret {
+                metadata: ObjectMeta {
+                    name: Some("no-owner".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let ctx = AkContextData {
+                secret_store: build_store(vec![deleting, no_owner]),
+                ..dummy_ak_ctx(client)
+            };
+            assert!(update_attestation_keys(&ctx).await.is_ok());
         });
     }
 }

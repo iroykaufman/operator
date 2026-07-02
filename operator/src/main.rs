@@ -259,9 +259,6 @@ async fn main() -> Result<()> {
 
     const CACHE_SYNC_TIMEOUT: Duration = Duration::from_secs(60);
 
-    // Launch controllers that do not depend on reflector caches first.
-    register_server::launch_keygen_controller(kube_client.clone()).await;
-
     // Spawn reflectors (starts background list-watch immediately).
     let ak_ctx = Arc::new(attestation_key_register::AkContextData::new(
         kube_client.clone(),
@@ -283,10 +280,11 @@ async fn main() -> Result<()> {
 
     attestation_key_register::launch_ak_controller(ak_ctx.clone()).await;
     attestation_key_register::launch_machine_ak_controller(ak_ctx.clone()).await;
-    attestation_key_register::launch_secret_ak_controller(ak_ctx).await;
-    reference_values::launch_rv_image_controller(kube_client.clone()).await;
-    reference_values::launch_rv_job_controller(kube_client.clone()).await;
-    trustee::launch_trustee_sync_controller(kube_client.clone()).await;
+    attestation_key_register::launch_secret_ak_controller(ak_ctx.clone()).await;
+    register_server::launch_keygen_controller(ak_ctx.clone()).await;
+    reference_values::launch_rv_image_controller(ak_ctx.clone()).await;
+    reference_values::launch_rv_job_controller(ak_ctx.clone()).await;
+    trustee::launch_trustee_sync_controller(ak_ctx).await;
 
     Controller::new(cl, watcher::Config::default())
         .run(reconcile, controller_error_policy, ctx)

@@ -42,6 +42,7 @@ use operator::{
 
 /// Shared context for the three attestation-key controllers.
 /// Stores give local cache access to avoid repeated API-server reads.
+#[derive(Clone)]
 pub struct AkContextData {
     pub client: Client,
     pub machine_store: Store<Machine>,
@@ -331,7 +332,7 @@ async fn secret_reconcile(
         match ev {
             Event::Apply(_secret) => {
                 // On creation/update, just update the trustee deployment volumes
-                trustee::update_attestation_keys(ctx.client.clone())
+                trustee::update_attestation_keys(&ctx)
                     .await
                     .map(|_| Action::await_change())
                     .map_err(|e| {
@@ -345,7 +346,7 @@ async fn secret_reconcile(
                     "AttestationKey secret {secret_name} is being deleted, updating trustee deployment volumes"
                 );
                 // Update trustee deployment - secrets with deletion_timestamp will be filtered out
-                trustee::update_attestation_keys(ctx.client.clone())
+                trustee::update_attestation_keys(&ctx)
                     .await
                     .map(|_| Action::await_change())
                     .map_err(|e| {

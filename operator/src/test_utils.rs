@@ -2,17 +2,21 @@
 //
 // SPDX-License-Identifier: MIT
 
+use crate::attestation_key_register::AkContextData;
 use crate::trustee;
 use compute_pcrs_lib::Pcr;
+use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use k8s_openapi::{
     api::core::v1::{ConfigMap, Secret},
     jiff::Timestamp,
 };
+use kube::Client;
 use kube::api::ObjectMeta;
+use kube::runtime::reflector;
 use std::collections::BTreeMap;
 use trusted_cluster_operator_lib::reference_values::{ImagePcr, ImagePcrs, PCR_CONFIG_FILE};
-use trusted_cluster_operator_lib::{Machine, MachineSpec};
+use trusted_cluster_operator_lib::{AttestationKey, Machine, MachineSpec};
 
 pub fn dummy_pcrs() -> ImagePcrs {
     ImagePcrs(BTreeMap::from([(
@@ -105,5 +109,15 @@ pub fn dummy_ak_secret(name: &str) -> Secret {
             k8s_openapi::ByteString(b"test-ak-public-key".to_vec()),
         )])),
         ..Default::default()
+    }
+}
+
+pub fn dummy_ak_ctx(client: Client) -> AkContextData {
+    AkContextData {
+        client,
+        machine_store: reflector::store::<Machine>().0,
+        ak_store: reflector::store::<AttestationKey>().0,
+        secret_store: reflector::store::<Secret>().0,
+        deployment_store: reflector::store::<Deployment>().0,
     }
 }
