@@ -28,12 +28,11 @@ mod register_server;
 #[cfg(test)]
 mod test_utils;
 mod trustee;
-
 use crate::conditions::*;
 use operator::*;
 
 /// Default tag for Trustee image
-const TRUSTEE_VERSION: &str = "v0.17.0";
+const TRUSTEE_VERSION: &str = "v0.20.0";
 /// Default version tag for operator-managed component images
 const COMPONENT_VERSION: &str = "v0.2.0";
 /// Default registry
@@ -254,7 +253,7 @@ async fn install_attestation_key_register(
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
-
+    let _ = jsonwebtoken_openssl::install_default();
     let kube_client = Client::try_default().await?;
     info!("trusted execution clusters operator",);
 
