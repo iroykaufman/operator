@@ -7,11 +7,14 @@ use trusted_cluster_operator_test_utils::*;
 
 cfg_if::cfg_if! {
 if #[cfg(feature = "virtualization")] {
-use anyhow::Result;
+use anyhow::{Context, Result};
 use k8s_openapi::api::apps::v1::Deployment;
 use kube::Api;
 use trusted_cluster_operator_lib::Machine;
 use trusted_cluster_operator_test_utils::virt::{self, VmBackend};
+use tokio::time::timeout;
+use kube::runtime::wait::await_condition;
+
 
 const ENCRYPTED_ROOT_ASSERT: &str = "should have an encrypted root device (attestation failed)";
 const ENCRYPTED_ROOT_WARN: &str = "Backend reports that Machine IDs cannot be correlated to IP \
@@ -74,6 +77,41 @@ async fn test_attestation() -> anyhow::Result<()> {
 
     assert!(has_encrypted_root, "VM {ENCRYPTED_ROOT_ASSERT}");
     test_ctx.info("Attestation successful: encrypted root device verified");
+    att_ctx.cleanup().await?;
+    test_ctx.cleanup().await?;
+    Ok(())
+}
+}
+
+virt_test! {
+async fn test_provider_id_registration() -> anyhow::Result<()> {
+    let test_ctx = setup!().await?;
+    let vm_name = "test-vm-provider-id";
+    let att_ctx = SingleAttestationContext::new(vm_name, &test_ctx).await?;
+
+    test_ctx.info("Verifying encrypted root device");
+    let has_encrypted_root = att_ctx.verify_encrypted_root().await?;
+
+    assert!(has_encrypted_root, "VM {ENCRYPTED_ROOT_ASSERT}");
+    test_ctx.info("Attestation successful: encrypted root device verified");
+
+    test_ctx.info("Verifying providerID registration");
+    let machines: Api<Machine> = Api::namespaced(test_ctx.client().clone(), test_ctx.namespace());
+    let name = machines
+        .list(&Default::default())
+        .await?
+        .items
+        .into_iter()
+        .next()
+        .and_then(|m| m.metadata.name)
+        .context("No Machine was registered for the VM")?;
+
+    let has_provider_id = await_condition(machines, &name, |m: Option<&Machine>| {
+        m.and_then(|m| m.spec.provider_id.as_ref()).is_some()
+    });
+    timeout(scaled_duration(180), has_provider_id)
+        .await
+        .context("providerID did not become available")??;
     att_ctx.cleanup().await?;
     test_ctx.cleanup().await?;
     Ok(())
