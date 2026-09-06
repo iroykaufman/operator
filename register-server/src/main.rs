@@ -7,7 +7,11 @@ use anyhow::Context;
 use axum::extract::State;
 use axum::http::{header, HeaderMap};
 use axum::response::{IntoResponse, Json};
-use axum::{http::StatusCode, routing::get, Router};
+use axum::{
+    http::StatusCode,
+    routing::{get, put},
+    Router,
+};
 use axum_server::tls_openssl::OpenSSLConfig;
 use base64::prelude::{Engine as _, BASE64_STANDARD};
 use clap::Parser;
@@ -21,6 +25,7 @@ use ignition_config::v3_6::{
 };
 use k8s_openapi::api::core::v1::Secret;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
+use kube::api::{Patch, PatchParams};
 use kube::{Api, Client};
 use log::{error, info};
 use std::net::SocketAddr;
@@ -34,6 +39,9 @@ use trusted_cluster_operator_lib::{
 /// Allow for an operator::KUBE_READ_TIMEOUT to hit (5 minutes) plus one minute,
 /// thus 360s / 5s (clevis-pin-trustee's delay)
 const RETRIES: u32 = 72;
+
+/// Resource path where nodes report their providerID and UUID.
+const BIND_RESOURCE: &str = "bind";
 
 /// Script that reports the node's Azure providerID and UUID to the /bind endpoint.
 const GET_PROVIDERID_SCRIPT: &str = include_str!("./get-providerid.sh");
@@ -277,7 +285,7 @@ async fn register_handler(
 
     // Reach the bind endpoint at the same address the node just used to reach us.
     let rs_url = match headers.get(header::HOST).and_then(|h| h.to_str().ok()) {
-        Some(host) => format!("{scheme}://{host}/bind"),
+        Some(host) => format!("{scheme}://{host}/{BIND_RESOURCE}"),
         None => return internal_error(anyhow::anyhow!("Request is missing a Host header")),
     };
 
@@ -288,6 +296,46 @@ async fn register_handler(
     };
 
     (StatusCode::OK, Json(ignition_json))
+}
+
+/// Payload a node reports to /bind: its UUID and the providerID it discovered.
+#[derive(serde::Deserialize)]
+struct BindRequest {
+    uuid: String,
+    #[serde(rename = "providerID")]
+    provider_id: String,
+}
+
+/// Patch the Machine named after the reported UUID with its providerID.
+async fn bind_handler(
+    State(AppState { kube_client, .. }): State<AppState>,
+    Json(req): Json<BindRequest>,
+) -> impl IntoResponse {
+    let machine_name = format!("machine-{}", req.uuid);
+    info!(
+        "Received bind request for {machine_name}: providerID={}",
+        req.provider_id
+    );
+
+    let machines: Api<Machine> = Api::default_namespaced(kube_client);
+    let patch = serde_json::json!({ "spec": { "providerID": req.provider_id } });
+    match machines
+        .patch(
+            &machine_name,
+            &PatchParams::default(),
+            &Patch::Merge(&patch),
+        )
+        .await
+    {
+        Ok(_) => {
+            info!("Patched {machine_name} with its providerID");
+            StatusCode::OK
+        }
+        Err(e) => {
+            error!("Failed to patch {machine_name}: {e:?}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
 }
 
 async fn create_machine(
@@ -331,8 +379,10 @@ async fn main() {
         kube_client: Client::try_default().await.expect(err),
         scheme,
     };
+    let bind_endpoint = format!("/{BIND_RESOURCE}");
     let app = Router::new()
         .route(&endpoint, get(register_handler))
+        .route(&bind_endpoint, put(bind_handler))
         .with_state(state);
     let addr = SocketAddr::from(([0, 0, 0, 0], args.port));
     let service = app.into_make_service();
