@@ -11,6 +11,7 @@ use kube::runtime::reflector::{self, Lookup, Store};
 use kube::runtime::watcher;
 use std::collections::BTreeMap;
 use std::hash::Hash;
+use trusted_cluster_operator_lib::TrustedExecutionCluster;
 use trusted_cluster_operator_lib::reference_values::pcrs_to_status;
 use trusted_cluster_operator_lib::{ApprovedImageStatusPcrs, Machine, MachineSpec};
 
@@ -177,6 +178,24 @@ pub fn dummy_trustee_auth() -> Secret {
         data: Some(data),
         ..Default::default()
     }
+}
+
+pub fn dummy_cluster_with_mock_kbs(expected_requests: usize) -> TrustedExecutionCluster {
+    use trusted_cluster_operator_test_utils::mock_client::dummy_cluster;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().take(expected_requests) {
+            let mut stream = stream.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+            let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+        }
+    });
+    let mut cluster = dummy_cluster();
+    cluster.spec.public_trustee_addr = Some(format!("127.0.0.1:{port}"));
+    cluster
 }
 
 pub fn dummy_machine(id: &str) -> Machine {
