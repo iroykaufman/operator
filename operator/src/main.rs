@@ -10,6 +10,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use env_logger::Env;
 use futures_util::StreamExt;
+use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{ConfigMap, Secret};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::runtime::controller::{Action, Controller};
@@ -249,6 +250,7 @@ async fn main() -> Result<()> {
     let (ak_store, ak_writer) = reflector::store::<AttestationKey>();
     let (secret_store, secret_writer) = reflector::store::<Secret>();
     let (image_store, image_writer) = reflector::store::<ApprovedImage>();
+    let (deployment_store, deployment_writer) = reflector::store::<Deployment>();
 
     let tec_kind = "TrustedExecutionCluster";
     spawn_reflector::<TrustedExecutionCluster>(tec_writer, kube_client.clone(), tec_kind);
@@ -257,6 +259,7 @@ async fn main() -> Result<()> {
     spawn_reflector::<AttestationKey>(ak_writer, kube_client.clone(), "AttestationKey");
     spawn_reflector::<Secret>(secret_writer, kube_client.clone(), "Secret");
     spawn_reflector::<ApprovedImage>(image_writer, kube_client.clone(), "ApprovedImage");
+    spawn_reflector::<Deployment>(deployment_writer, kube_client.clone(), "Deployment");
 
     let mut ctx = OperatorContext::new(kube_client.clone());
     ctx.tec_store = tec_store;
@@ -265,6 +268,7 @@ async fn main() -> Result<()> {
     ctx.ak_store = ak_store;
     ctx.secret_store = secret_store;
     ctx.image_store = image_store;
+    ctx.deployment_store = deployment_store;
     let ctx = Arc::new(ctx);
 
     // Best-effort wait for caches; controllers will work with
@@ -283,6 +287,7 @@ async fn main() -> Result<()> {
         "AttestationKey" => ctx.ak_store,
         "Secret" => ctx.secret_store,
         "ApprovedImage" => ctx.image_store,
+        "Deployment" => ctx.deployment_store,
     }
 
     info!("Starting controllers");
