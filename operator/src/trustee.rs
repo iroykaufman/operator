@@ -106,6 +106,18 @@ fn recompute_reference_values(all_pcrs: &[Vec<ApprovedImageStatusPcrs>]) -> Vec<
         .collect()
 }
 
+pub fn is_trustee_available(ctx: &OperatorContext) -> bool {
+    let obj_ref = ObjectRef::new(TRUSTEE_DEPLOYMENT).within(ctx.client.default_namespace());
+    ctx.deployment_store
+        .get(&obj_ref)
+        .and_then(|d| d.status.clone())
+        .and_then(|s| s.conditions)
+        .is_some_and(|cs| {
+            cs.iter()
+                .any(|c| c.type_ == "Available" && c.status == "True")
+        })
+}
+
 pub async fn update_reference_values(ctx: &OperatorContext) -> Result<()> {
     let images: Api<ApprovedImage> = Api::default_namespaced(ctx.client.clone());
     let image_list = images.list(&Default::default()).await?;
@@ -128,11 +140,7 @@ pub async fn update_reference_values(ctx: &OperatorContext) -> Result<()> {
 
     let reference_values = recompute_reference_values(&all_pcrs);
 
-    if let Err(e) = sync_reference_values(ctx, &reference_values).await {
-        warn!(
-            "Failed to sync reference values to KBS (will retry on next deployment reconcile): {e}"
-        );
-    }
+    sync_reference_values(ctx, &reference_values).await?;
     info!(
         "Recomputed reference values from {} committed images",
         all_pcrs.len()
@@ -848,6 +856,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_rvs_success() {
         let _ = jsonwebtoken_openssl::install_default();
+        let cluster = dummy_cluster_with_mock_kbs(4); // There are four reference values (AK, pcr4, pcr7, pcr14), each one creates a new POST request to Trustee.
         let clos = async |req: Request<_>, ctr| match (ctr, req.method()) {
             (0, &Method::GET) => {
                 let image = committed_approved_image("cos", dummy_status_pcrs());
@@ -865,7 +874,7 @@ mod tests {
             auth.metadata.name = Some(TRUSTEE_AUTH_SECRET.to_string());
             let mut ctx = OperatorContext::new(client);
             ctx.secret_store = store_with(vec![auth]);
-            ctx.tec_store = store_with(vec![dummy_cluster()]);
+            ctx.tec_store = store_with(vec![cluster.clone()]);
             assert!(update_reference_values(&ctx).await.is_ok());
         });
     }

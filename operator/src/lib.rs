@@ -10,6 +10,7 @@
 
 use anyhow::{Result, anyhow};
 use futures_util::StreamExt;
+use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{ConfigMap, Secret, SecretVolumeSource, Volume, VolumeMount};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 use k8s_openapi::jiff::Timestamp;
@@ -42,7 +43,7 @@ pub struct OperatorContext {
     pub ak_store: Store<AttestationKey>,
     pub secret_store: Store<Secret>,
     pub image_store: Store<ApprovedImage>,
-    // Add a deployment store if ever required
+    pub deployment_store: Store<Deployment>,
 }
 
 impl OperatorContext {
@@ -57,6 +58,7 @@ impl OperatorContext {
             ak_store: reflector::store().0,
             secret_store: reflector::store().0,
             image_store: reflector::store().0,
+            deployment_store: reflector::store().0,
         }
     }
 
