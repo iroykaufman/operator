@@ -489,7 +489,13 @@ pub async fn handle_new_image(
 
 pub async fn disallow_image(ctx: &OperatorContext, resource_name: &str) -> Result<()> {
     info!("Disallowing image {resource_name}, recomputing reference values");
-    trustee::update_reference_values(ctx).await
+    if let Err(e) = trustee::update_reference_values(ctx).await {
+        if trustee::is_trustee_available(ctx) {
+            return Err(e);
+        }
+        warn!("Trustee unavailable, skipping reference value sync: {e}");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -545,6 +551,7 @@ mod tests {
     #[tokio::test]
     async fn test_job_reconcile_success() {
         let _ = jsonwebtoken_openssl::install_default();
+        let cluster = dummy_cluster_with_mock_kbs(4); // There are four reference values (AK, pcr4, pcr7, pcr14), each one creates a new POST request to Trustee.
         let clos = async |req: Request<_>, ctr| match (ctr, req.method()) {
             (0, &Method::DELETE) => Ok(serde_json::to_string(&Job::default()).unwrap()),
             (1, &Method::GET) => {
@@ -562,7 +569,7 @@ mod tests {
             auth.metadata.name = Some("trustee-auth".to_string());
             let mut ctx = OperatorContext::new(client);
             ctx.secret_store = store_with(vec![auth]);
-            ctx.tec_store = store_with(vec![dummy_cluster()]);
+            ctx.tec_store = store_with(vec![cluster.clone()]);
             let job = Arc::new(dummy_job());
             let result = job_reconcile(job, Arc::new(ctx)).await.unwrap();
             assert_eq!(result, LONG_REQUEUE);
@@ -667,8 +674,8 @@ mod tests {
     #[tokio::test]
     async fn test_image_remove_reconcile() {
         let _ = jsonwebtoken_openssl::install_default();
+        let cluster = dummy_cluster_with_mock_kbs(4); // There are four reference values (AK, pcr4, pcr7, pcr14), each one creates a new POST request to Trustee.
         let image = Arc::new(dummy_image());
-        let cluster = Some(dummy_cluster());
         let clos = async |req: Request<_>, ctr| match (ctr, req.method()) {
             (0, &Method::GET) => {
                 let list = ObjectList::<ApprovedImage> {
@@ -685,9 +692,11 @@ mod tests {
             auth.metadata.name = Some("trustee-auth".to_string());
             let mut ctx = OperatorContext::new(client);
             ctx.secret_store = store_with(vec![auth]);
-            ctx.tec_store = store_with(vec![dummy_cluster()]);
+            ctx.tec_store = store_with(vec![cluster.clone()]);
             assert_eq!(
-                image_remove_reconcile(&ctx, image, cluster).await.unwrap(),
+                image_remove_reconcile(&ctx, image, Some(cluster.clone()))
+                    .await
+                    .unwrap(),
                 LONG_REQUEUE
             );
         });
