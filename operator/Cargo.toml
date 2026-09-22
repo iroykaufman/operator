@@ -23,7 +23,7 @@ jsonptr = "0.8.1"
 k8s-openapi.workspace = true
 kube.workspace = true
 log.workspace = true
-oci-client = { version = "0.17.0", default-features = false, features = ["native-tls"] }
+oci-client = { version = "0.18.0", default-features = false, features = ["native-tls"] }
 oci-spec = "0.10.0"
 openssl = "0.10.80"
 serde.workspace = true
