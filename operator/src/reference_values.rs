@@ -114,7 +114,6 @@ async fn job_reconcile(
     // Foreground deletion: Delete the pod too
     let delete = jobs.delete(name, &DeleteParams::foreground()).await;
     delete.map_err(Into::<anyhow::Error>::into)?;
-    trustee::update_reference_values(&ctx).await?;
 
     if let Some(owner) = job
         .metadata
@@ -141,6 +140,8 @@ async fn job_reconcile(
         )
         .await;
     }
+
+    trustee::update_reference_values(&ctx).await?;
     Ok(LONG_REQUEUE)
 }
 
